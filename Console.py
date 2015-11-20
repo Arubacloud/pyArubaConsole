@@ -48,10 +48,16 @@ def loggedin_dc():
 def run_async_job(method=None, args=None):
     try:
         for d in loggedin_dc():
-            if isinstance(method, str):
-                vmw_q.put([getattr(pool[d], method), args])
-            elif hasattr(method, '__call__'):
-                vmw_q.put([method, args])
+            if args is not None:
+                if isinstance(method, str):
+                    vmw_q.put([getattr(pool[d], method), args])
+                elif hasattr(method, '__call__'):
+                    vmw_q.put([method, args])
+            else:
+                if isinstance(method, str):
+                    vmw_q.put([getattr(pool[d], method)])
+                elif hasattr(method, '__call__'):
+                    vmw_q.put([method])
         vmw_q.join()
     except Exception as e:
         exc_type, exc_obj, exc_tb = sys.exc_info()
@@ -66,13 +72,14 @@ class VMWorker(threading.Thread):
     def __init__(self):
         super(VMWorker, self).__init__()
         self.stop = False
-        self.logger = ArubaLog(name=self.__class__.__name__, level=logging.DEBUG, log_to_file=False)
+        self.logger = logger
+        self.logger.name = self.__class__.__name__
 
     def run(self):
         while self.stop is False:
             try:
                 if not vmw_q.empty():
-                    items = vmw_q.get(True, 1)
+                    items = vmw_q.get(True, 10)
                     try:
                         function = items[0]
                         args = items[1:]
@@ -83,27 +90,29 @@ class VMWorker(threading.Thread):
                         self.logger.debug('Error retrieving queue command: %s' % items)
                     self.logger.debug('Function: %s args: %s' % (function, args))
                     self.logger.debug('Entering Thread VMWorker with method: %s' % function)
-                    if len(args) > 0:
-                        function(*args)
-                    else:
+                    if len(args) == 0:
                         function()
+                    else:
+                        function(*args)
                     self.logger.debug('Called method: %s.' % function)
                     vmw_q.task_done()
-            except Queue.Empty:
                 time.sleep(0.25)
+            except Queue.Empty:
+                pass
 
 
 class CreatorWorker(threading.Thread):
     def __init__(self):
         threading.Thread.__init__(self)
         self.stop = False
-        self.logger = ArubaLog(name=self.__class__.__name__, level=logging.INFO, log_to_file=False)
+        self.logger = logger
+        self.logger.name = self.__class__.__name__
 
     def run(self):
         while self.stop is False:
             try:
                 if not creator_q.empty():
-                    vm_type, params = creator_q.get(True, 1)
+                    vm_type, params = creator_q.get(True, 10)
                     if params.number > 1:
                         rnd = ''.join(random.choice(string.ascii_letters) for _ in range(6))
                         vm_name = '%s-%s' % (params.vmname, rnd)
@@ -152,6 +161,7 @@ class CreatorWorker(threading.Thread):
                         cprint('Creation of VM: %s Done.' % vm_name, 'green')
                     creator_q.task_done()
                     vm_creation_sem.release()
+                time.sleep(0.25)
             except Queue.Empty:
                 pass
 
@@ -179,12 +189,13 @@ class Datacenter(CloudInterface):
         return self._loggedin
 
 
+# noinspection PyBroadException
 class Creator(Cmd, object):
 
     def __init__(self):
         super(Creator, self).__init__()
         self.prompt = '#(creator)> '
-        self.logger = ArubaLog(name=self.__class__.__name__, level=logging.INFO, log_to_file=False)
+        self.logger = logger
 
     @staticmethod
     def do_smart(args):
@@ -256,7 +267,7 @@ class IConsole(Cmd, object):
         Cmd.__init__(self)
         self.prompt = "#> "
         self.intro = "Wellcome to Aruba Cloud Python Console"
-        self.logger = ArubaLog(name=self.__class__.__name__, level=logging.INFO, log_to_file=False)
+        self.logger = logger
 
     def do_exit(self, args):
         """Exits from the console"""
@@ -387,8 +398,8 @@ class IConsole(Cmd, object):
         parser.add_argument('--name', type=str, help='The name of the vm(s) to be powered off.', required=True)
         try:
             parsed = parser.parse_args(args.split())
-        except ArgumentError:
-            return 0
+        except:
+            return
         if isinstance(parsed.dc, str):
             run_async_job(method='get_vm', args=parsed.name)
             for vm in pool[parsed.dc].vmlist.last_search_result:
@@ -403,13 +414,14 @@ class IConsole(Cmd, object):
 
     @staticmethod
     def do_poweron(args=None):
+        """Poweron a VM. See poweron -h for help."""
         parser = argparse.ArgumentParser(prog='poweron', add_help=True)
         parser.add_argument('--dc', type=str, help='ID of the datacenter.')
         parser.add_argument('--name', type=str, help='The name of the vm(s) to be powered off.')
         try:
             parsed = parser.parse_args(args.split())
-        except ArgumentError:
-            return True
+        except:
+            return
         if isinstance(parsed.dc, str):
             run_async_job(method='get_vm', args=parsed.name)
             for _ in loggedin_dc():
@@ -425,24 +437,34 @@ class IConsole(Cmd, object):
 
     @staticmethod
     def do_deletevm(args):
-        """Delete Virtual Machine from a specified pattern name on each datacenter you logged in"""
-        """Es. deletevm MyVM"""
-        if args is None:
-            raise Exception('No pattern specified.')
-        pattern = args.split()[0]
-        run_async_job(method='get_vm', args=pattern)
+        """Delete a Virtual Machine. See deletevm -h for help."""
+        parser = argparse.ArgumentParser(prog='deletevm', add_help=True)
+        parser.add_argument('--dc', type=str, help='ID of the datacenter.')
+        parser.add_argument('--name', type=str,
+                            help='The name of the vm(s) to be powered off.'
+                                 'WARNING: If you have two or more VM named for example: testvm, testvm2, testvm3 and'
+                                 'you do:'
+                                 'deletevm --dc 2 --name testvm, ALL OF THE MACHINE NAMED TESTVM* WILL BE POWERED OFF'
+                                 'AND DELETED!!!!'
+                            )
+        try:
+            p = parser.parse_args(args.split())
+        except:
+            return
+        run_async_job(method='get_vm', args=p.name)
         cprint('Powering off VM...', 'yellow')
         for dc in loggedin_dc():
             for vm in pool[dc].vmlist.last_search_result:
                 vmw_q.put([pool[dc].poweroff_server, None, vm.sid])
         vmw_q.join()
-        cprint('Waiting for all poweroff to finish...', 'yellow')
-        run_async_job(method=wait_for_all_jobs_to_finish, args=dc)
+        cprint('Waiting for VM(s) to poweroff...', 'yellow')
+        run_async_job(method=wait_for_all_jobs_to_finish, args=p.dc)
         cprint('Deleting VM...', 'red')
         for dc in loggedin_dc():
             for vm in pool[dc].vmlist.last_search_result:
                 vmw_q.put([pool[dc].delete_vm, None, vm.sid])
         vmw_q.join()
+        # update internal server list
         run_async_job(method='get_servers')
 
     """
