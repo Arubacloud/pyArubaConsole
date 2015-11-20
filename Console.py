@@ -309,14 +309,15 @@ class IConsole(Cmd, object):
     def do_showvm(args):
         """Search across logged in datacenter all vm with the name specified name. See showvm -h for help."""
         parser = argparse.ArgumentParser(prog='showvm', add_help=True)
-        parser.add_argument('--dc', type=str, help='ID of the datacenter.', required=False)
+        parser.add_argument('--dc', type=str, help='ID of the datacenter.', required=False, default=None)
         parser.add_argument('--name', type=str, help='Pattern String to find.', required=False)
         try:
             p = parser.parse_args(args.split())
         except:
             return
-        for dc in loggedin_dc():
-            print("Datacenter: {}".format(p.dc))
+        dc_list = [p.dc] if p.dc is not None else loggedin_dc()
+        for dc in dc_list:
+            print("Datacenter: {}".format(dc))
             for vm in pool[dc].get_vm(pattern=p.name):
                 try:
                     from ArubaCloud.objects.VmTypes import Pro, Smart
